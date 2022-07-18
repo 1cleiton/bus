@@ -1,0 +1,87 @@
+name: Deploy Production Kubernets
+on:
+  push:
+    tags:
+      - "release/v*"
+      - "hotfix/v*"
+jobs:
+  build-aws:
+    name: Build AWS
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.PROD_AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.PROD_AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.PROD_AWS_REGION }}
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+      - name: Extract tag name
+        id: extract_tag
+        run: echo ::set-output name=tag::${GITHUB_REF#refs/*/} | sed "s/\//-/" # change 'hotflix/test' to 'hotflix-test' for example.
+      - name: Build, tag, and push image to Amazon ECR
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: production
+          IMAGE_TAG: ${{ steps.extract_tag.outputs.tag }}
+        run: |
+          cd backend
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          echo "::set-output name=image::$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          cd valora/static
+          aws s3 cp . s3://${{ secrets.STATIC_BUCKET_PRODUCTION }} --recursive --acl public-read
+          aws cloudfront create-invalidation --distribution-id ${{ secrets.PRODUCTION_CLOUDFRONT_DISTRIBUTION_ID }} --paths "/*"
+      - name: Backup Database
+        id: backup-database
+        run: |
+          aws rds create-db-snapshot --db-instance-identifier producao --db-snapshot-identifier producao-$(date +%Y%m%d%H%M%S) --region ${{ secrets.STAGING_AWS_REGION }}
+  deploy:
+    needs: build-aws
+    name: Deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.PROD_AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.PROD_AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.PROD_AWS_REGION }}
+
+      - name: Extract tag name
+        id: extract_tag
+        run: echo ::set-output name=tag::${GITHUB_REF#refs/*/} | sed "s/\//-/"
+
+      - name: Checkout
+        uses: actions/checkout@v1
+
+      - name: set image
+        uses: ./.github/actions/production/
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+          GITHUB_TOKEN: ${{ github.token }}
+          IMAGE_TAG: ${{ steps.extract_tag.outputs.tag }}
+        with:
+          args: |
+            "
+            kubectl set image deployment/django django=${{ secrets.ECR_PRODUCTION_REPOSITORY }}:$IMAGE_TAG &&
+            kubectl set image deployment/beat beat=${{ secrets.ECR_PRODUCTION_REPOSITORY }}:$IMAGE_TAG &&
+            kubectl set image deployment/default-worker default-worker=${{ secrets.ECR_PRODUCTION_REPOSITORY }}:$IMAGE_TAG &&
+            kubectl set image deployment/priority-worker priority-worker=${{ secrets.ECR_PRODUCTION_REPOSITORY }}:$IMAGE_TAG &&
+            kubectl set image deployment/flower flower=${{ secrets.ECR_PRODUCTION_REPOSITORY }}:$IMAGE_TAG &&
+            kubectl scale deployment.v1.apps/django --replicas=0 &&
+            kubectl scale deployment.v1.apps/beat --replicas=0 &&
+            kubectl scale deployment.v1.apps/default-worker --replicas=0 &&
+            kubectl scale deployment.v1.apps/priority-worker --replicas=0 &&
+            kubectl scale deployment.v1.apps/flower --replicas=0 &&
+            kubectl scale deployment.v1.apps/django --replicas=4 &&
+            kubectl scale deployment.v1.apps/beat --replicas=1 &&
+            kubectl scale deployment.v1.apps/default-worker --replicas=4 &&
+            kubectl scale deployment.v1.apps/priority-worker --replicas=1 &&
+            kubectl scale deployment.v1.apps/flower --replicas=1
+            "

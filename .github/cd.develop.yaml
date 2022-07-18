@@ -1,0 +1,97 @@
+name: Deploy Staging
+
+on:
+  push:
+    branches:
+      - develop
+
+jobs:
+  continuous-integration:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Lint with flake8
+        run: |
+          cd backend
+          sudo pip3 install flake8
+          flake8 bus
+
+      - name: Run tests
+        env:
+          DJANGO_COMMAND: test
+        run: |
+          cd backend
+          cp local.env.sample local.env
+          docker-compose build --pull
+          docker-compose run --rm django
+
+  build-aws:
+    needs: continuous-integration
+    name: Build AWS
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.STAGING_AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.STAGING_AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.STAGING_AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Build, tag, and push image to Amazon ECR
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: staging
+          IMAGE_TAG: latest
+        run: |
+          cd backend
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          echo "::set-output name=image::$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          cd valora/static
+          aws s3 cp . s3://${{ secrets.STATIC_BUCKET_STAGING }} --recursive --acl public-read
+          aws cloudfront create-invalidation --distribution-id ${{ secrets.STAGING_CLOUDFRONT_DISTRIBUTION_ID }} --paths "/*"
+
+  deploy-to-kubernets:
+    needs: build-aws
+    name: Deploy to Kubernetes
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.STAGING_AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.STAGING_AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.STAGING_AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Deployment
+        run: |
+          aws --region us-east-1 eks update-kubeconfig --name staging
+          export KUBECONFIG=$HOME/.kube/config
+
+          kubectl config --kubeconfig=KUBECONFIG set-cluster ${{ secrets.CLUSTER_STAGING }} --server=${{ secrets.SERVER_STAGING }} --insecure-skip-tls-verify="true"
+          kubectl config --kubeconfig=KUBECONFIG set-context ${{ secrets.CLUSTER_STAGING }} --cluster=${{ secrets.CLUSTER_STAGING }} --user=${{ secrets.CLUSTER_STAGING }}
+          kubectl config --kubeconfig=KUBECONFIG use-context ${{ secrets.CLUSTER_STAGING }}
+          kubectl scale deployment.v1.apps/staging --replicas=0
+          kubectl scale deployment.v1.apps/beat --replicas=0
+          kubectl scale deployment.v1.apps/default-worker --replicas=0
+          kubectl scale deployment.v1.apps/priority-worker --replicas=0
+          kubectl scale deployment.v1.apps/staging --replicas=1
+          kubectl scale deployment.v1.apps/beat --replicas=1
+          kubectl scale deployment.v1.apps/default-worker --replicas=1
+          kubectl scale deployment.v1.apps/priority-worker --replicas=1

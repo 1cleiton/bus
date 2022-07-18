@@ -1,0 +1,15 @@
+## Python
+__pycache__
+
+## Project
+*/venv/*
+/media/
+/static/
+local.env
+
+## Editors and IDEs
+/.vscode/*
+.env
+*.pem
+.coverage
+**.log.*

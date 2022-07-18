@@ -1,0 +1,116 @@
+version: "3.3"
+services:
+  postgres:
+    image: postgres:10.1
+    ports:
+      - 5432:5432
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+  redis:
+    image: redis:5
+    volumes:
+      - redis-data:/data
+  memcached:
+    image: "bitnami/memcached:latest"
+  api:
+    image: api:dev
+    build:
+      context: .
+      args:
+        release: dev
+    volumes:
+      - ./:/usr/src/app
+      - media:/usr/src/app/media
+      - static:/usr/src/app/static
+    env_file:
+      - develop.env
+      - local.env
+    environment:
+      - COMMAND=${DJANGO_COMMAND:-runserver}
+    ports:
+      - 8000:8000
+    depends_on:
+      - postgres
+      - redis
+      - memcached
+  worker:
+    image: api:dev
+    volumes:
+      - ./:/usr/src/app
+      - media:/usr/src/app/media
+      - static:/usr/src/app/static
+    env_file:
+      - develop.env
+      - local.env
+    environment:
+      - COMMAND=worker
+      - C_FORCE_ROOT=True
+    depends_on:
+      - api
+  priority:
+    image: api:dev
+    volumes:
+      - ./:/usr/src/app
+      - media:/usr/src/app/media
+      - static:/usr/src/app/static
+    env_file:
+      - develop.env
+      - local.env
+    environment:
+      - COMMAND=priority
+      - C_FORCE_ROOT=True
+    depends_on:
+      - api
+  beat:
+    image: api:dev
+    volumes:
+      - ./:/usr/src/app
+      - media:/usr/src/app/media
+      - static:/usr/src/app/static
+    env_file:
+      - develop.env
+      - local.env
+    environment:
+      - COMMAND=beat
+    depends_on:
+      - api
+  flower:
+    image: api:dev
+    volumes:
+      - ./:/usr/src/app
+      - media:/usr/src/app/media
+      - static:/usr/src/app/static
+    env_file:
+      - develop.env
+      - local.env
+    environment:
+      - COMMAND=flower
+    ports:
+      - 5555:5555
+    depends_on:
+      - api
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    environment:
+      - PGADMIN_DEFAULT_EMAIL=admin@admin.com
+      - PGADMIN_DEFAULT_PASSWORD=admin
+    ports:
+      - 8082:80
+    depends_on:
+      - postgres
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    environment:
+      - REDIS_HOSTS=default:redis:6379:0,sessions:redis:6379:1,broker:redis:6379:2
+    ports:
+      - 8081:8081
+    depends_on:
+      - redis
+volumes:
+  media: null
+  static: null
+  postgres-data: null
+  redis-data: null
+networks:
+  default:
+    driver: bridge
