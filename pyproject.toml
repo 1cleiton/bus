@@ -1,11 +1,12 @@
 [tool.poetry]
-name = "valora"
+name = "bus"
 version = "0.1.0"
 description = ""
 authors = ["Valora <valora@valora.cc>"]
 
 [tool.poetry.dependencies]
-python = "^3.10"
+python = "^3.8"
+Django = "^4.0.6"
 
 [tool.poetry.dev-dependencies]
 pytest = "*"
